@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import signal
 import tkinter as tk
 from tkinter import ttk
+from typing import NamedTuple
 
 from pulsectl import PulseIndexError
 import pulsectl_asyncio
@@ -12,6 +13,7 @@ import pulsectl_asyncio
 class Window:
     geometry: str
     root: tk.Tk | tk.Toplevel
+    state_label: ttk.Label
     volume_label: ttk.Label
     progress_bar: ttk.Progressbar
 
@@ -26,11 +28,12 @@ class Gui:
         self.root = root
 
         s = ttk.Style()
-        s.configure("TProgressbar", thickness=30,
+        s.configure("TProgressbar", thickness=24,
                     troughcolor="#333333", background="#00ddff")
         s.configure("TFrame", background="black")
         s.configure("TLabel", background="black",
                     foreground="white", font=('Cascadia Mono', 12))
+        s.configure("Icon.TLabel", font=('Font Awesome 6 Free Solid', 12))
 
         secondary = tk.Toplevel()
 
@@ -49,15 +52,16 @@ class Gui:
             frm = ttk.Frame(win, padding=8, style="TFrame")
             frm.grid()
 
-            ttk.Label(frm, text="VOL").grid(column=0, row=0)
+            state_label = ttk.Label(frm, style="Icon.TLabel")
+            state_label.grid(column=0, row=0)
             progress_bar = ttk.Progressbar(frm, orient="vertical", style="TProgressbar")
-            progress_bar.grid(column=0, row=1)
+            progress_bar.grid(column=0, row=1, pady=4)
             volume_label = ttk.Label(frm)
             volume_label.grid(column=0, row=2)
 
             win.geometry(g)
 
-            self.windows.append(Window(g, win, volume_label, progress_bar))
+            self.windows.append(Window(g, win, state_label, volume_label, progress_bar))
 
         root.update_idletasks()
         root.update()
@@ -70,20 +74,27 @@ class Gui:
             win.root.update_idletasks()
             win.root.update()
 
+    def update_window_state(self, win, state):
+        win.state_label["text"] = "" if state.mute else ""
+        win.progress_bar["value"] = state.volume * 100
+        if state.volume <= .999:
+            win.volume_label["text"] = "{:^3.0%}".format(state.volume)
+        else:
+            win.volume_label["text"] = "MAX"
+
+
+
     async def loop(self, queue: asyncio.Queue):
         while True:
             withdraw = asyncio.create_task(self.withdraw_timeout(3))
-            val = await queue.get()
+            state = await queue.get()
             withdraw.cancel()
 
             for win in self.windows:
                 win.root.deiconify()
                 win.root.geometry(win.geometry)
-                win.progress_bar["value"] = val * 100
-                if val <= .999:
-                    win.volume_label["text"] = "{:^3.0%}".format(val)
-                else:
-                    win.volume_label["text"] = "MAX"
+
+                self.update_window_state(win, state)
 
                 win.root.update_idletasks()
                 win.root.update()
@@ -95,19 +106,30 @@ class App:
     def __init__(self):
         self.volumes = asyncio.Queue()
 
+class SinkState(NamedTuple):
+    volume: float
+    mute: bool
+
+async def get_default_sink_state(pulse):
+    sink = await pulse.sink_default_get()
+    volume = sink.volume.value_flat
+    mute = sink.mute == 1
+
+    return SinkState(volume, mute)
+
 async def listen(queue: asyncio.Queue):
     async with pulsectl_asyncio.PulseAsync('volnotd') as pulse:
-        last_volume = (await pulse.sink_default_get()).volume.value_flat
+        last_state = await get_default_sink_state(pulse)
         async for event in pulse.subscribe_events('sink'):
             try:
-                sink = await pulse.sink_default_get()
+                state = await get_default_sink_state(pulse)
             except PulseIndexError:
                 continue
-            volume = sink.volume.value_flat
 
-            if volume != last_volume:
-                last_volume = volume
-                await queue.put(volume)
+            if state != last_state:
+                await queue.put(state)
+
+            last_state = state
 
 
 def r():
